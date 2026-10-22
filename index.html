@@ -142,7 +142,8 @@ label.filelbl>input[type=file]{position:absolute!important;inset:0;width:100%!im
               <label class="q-img cursor-pointer bg-indigo-600 text-white rounded-lg px-3 py-2 text-xs font-semibold" style="display:none">🖼️ เลือกภาพ (หลายภาพได้)<input id="q-img" type="file" accept="image/*" multiple="" class="hidden"></label>
               <label class="cursor-pointer bg-emerald-600 text-white rounded-lg px-3 py-2 text-xs font-semibold">📄 ไฟล์ข้อมูล (xlsx / csv / txt)<input id="q-file" type="file" accept=".xlsx,.xls,.csv,.tsv,.txt" class="hidden"></label>
             </div>
-            <div id="q-note" class="text-xs text-slate-500 mt-2">เวอร์ชันนี้ยังไม่รองรับการอ่านภาพ ใช้ไฟล์ข้อมูล (xlsx / csv / txt) แทน</div>
+            <div class="flex flex-wrap items-center gap-2 mt-2"><button type="button" class="gem-btn border border-slate-300 rounded-lg px-3 py-2 text-xs" onclick="openGemSettings()">⚙️ ตั้งค่า Google AI</button></div>
+            <div id="q-note" class="text-xs text-slate-500 mt-2"></div>
             <div id="q-status" class="text-xs mt-2 font-medium"></div>
             <label id="q-perbox" class="hidden block text-xs mt-2 bg-white border border-indigo-200 rounded-lg px-2 py-1.5"><input type="checkbox" id="q-per" checked=""> ใช้วันที่รายบุคคลตามภาพ (พบ <span id="q-pern"></span> ช่วงวันที่ต่างกัน) — บันทึกแยกเป็นรายการตามวันที่ของแต่ละคน</label>
             <div id="q-miss" class="hidden mt-2 text-xs"></div>
@@ -189,7 +190,7 @@ label.filelbl>input[type=file]{position:absolute!important;inset:0;width:100%!im
         </div>
         <div id="ai-files" class="text-xs text-slate-600 mt-2"></div>
         <details class="mt-2"><summary class="text-xs text-slate-600 cursor-pointer">เลือกรูป/ไฟล์ไม่ได้? วางข้อความหรือวางรูป (Ctrl+V) แทน</summary><textarea id="ai-paste" rows="4" class="w-full border border-slate-300 rounded-lg p-2 mt-1 text-xs" placeholder="คัดลอกรายชื่อ/ข้อความจากเอกสารมาวางที่นี่ หรือกดวางรูปจากคลิปบอร์ด"></textarea></details></div>
-      <button id="ai-run" class="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-lg px-4 py-2 font-semibold" disabled>🔍 อ่านและแยกข้อมูล</button>
+      <button type="button" class="gem-btn border border-slate-300 rounded-lg px-3 py-2 text-xs mr-2" onclick="openGemSettings()">⚙️ ตั้งค่า Google AI</button><button id="ai-run" class="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-lg px-4 py-2 font-semibold" disabled>🔍 อ่านและแยกข้อมูล</button>
       <div id="ai-st" class="text-xs text-slate-600"></div>
       <div id="ai-res" class="hidden space-y-2">
         <div class="font-semibold">4) ตรวจสอบและแก้ไขก่อนนำเข้า <span class="text-xs font-normal text-slate-500">(AI อาจอ่านผิดได้ โดยเฉพาะลายมือ/ภาพไม่ชัด — แก้ไขได้ทุกช่อง เพิ่ม/ลบแถวและวันที่ได้ แล้วตรวจก่อนกดนำเข้า)</span></div>
@@ -1998,6 +1999,135 @@ function fpOf(rows){
 }
 function showFp(){const e=$('fp');if(e)e.textContent=`รหัสข้อมูล ${fpOf(records)}`}
 
+/* ---------- Google Gemini adapter: ประมวลผล AI ผ่าน Google (เสถียร: ค้นหาโมเดลอัตโนมัติ + สลับสำรอง + ลองซ้ำ + timeout) ---------- */
+const GEM=(()=>{
+  const BASE='https://generativelanguage.googleapis.com/v1beta',K_KEY='dupcheck-gemini-key',K_MODEL='dupcheck-gemini-model',K_LIST='dupcheck-gemini-models';
+  const FALLBACK=['gemini-flash-latest','gemini-3.6-flash','gemini-3.5-flash']; // ใช้เมื่อค้นรายการโมเดลไม่ได้
+  const TIMEOUT=120000,MAX_IMAGES=16;
+  const ls={get:k=>{try{return localStorage.getItem(k)||''}catch(e){return ''}},set:(k,v)=>{try{v?localStorage.setItem(k,v):localStorage.removeItem(k)}catch(e){}}};
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  const G={lastModel:'',
+    key:()=>ls.get(K_KEY),model:()=>ls.get(K_MODEL),
+    save(key,model){ls.set(K_KEY,(key||'').trim());ls.set(K_MODEL,(model||'').trim());ls.set(K_LIST,'')},
+    limits:async()=>({images:{maxCount:MAX_IMAGES}})};
+  function err(code,msg,status){const e=new Error(msg);e.code=code;e.status=status;return e}
+  // เรียก API พร้อม timeout; แปลงข้อผิดพลาดเป็นข้อความไทย
+  async function call(method,path,body){
+    const key=G.key();if(!key)throw err('no_key','ยังไม่ได้ตั้งค่าคีย์ Google AI');
+    const ac=new AbortController(),t=setTimeout(()=>ac.abort(),TIMEOUT);let r;
+    try{r=await fetch(BASE+path,{method,headers:{'Content-Type':'application/json','x-goog-api-key':key},body:body?JSON.stringify(body):undefined,signal:ac.signal})}
+    catch(e){clearTimeout(t);throw e&&e.name==='AbortError'?err('timeout','Google ตอบช้าเกินกำหนด'):err('network','เชื่อมต่อ Google ไม่ได้ (ตรวจอินเทอร์เน็ต/การบล็อกของเครือข่าย)')}
+    clearTimeout(t);
+    let j=null;try{j=await r.json()}catch(e){}
+    if(r.ok)return j;
+    const m=(j&&j.error&&j.error.message)||('HTTP '+r.status),s=r.status;
+    if(s===429)throw err('rate_limited','โควตาหรือการใช้งานถี่เกินไป (429)',s);
+    if(s>=500)throw err('server','ระบบ Google ขัดข้องชั่วคราว ('+s+')',s);
+    if(s===404)throw err('model_missing','ไม่พบโมเดลนี้: '+m,s);
+    if(s===401||s===403||/API key|API_KEY|permission/i.test(m))throw err('bad_key','คีย์ Google AI ไม่ถูกต้องหรือไม่มีสิทธิ์ใช้งาน: '+m,s);
+    throw err('bad_request','Google ปฏิเสธคำขอ: '+m,s);
+  }
+  // ค้นรายการโมเดล Flash ที่ใช้ได้จริงกับคีย์นี้ (แคช 24 ชม.) เรียงใหม่สุดก่อน
+  async function discover(){
+    try{const c=JSON.parse(ls.get(K_LIST)||'null');if(c&&Date.now()-c.t<864e5&&c.m.length)return c.m}catch(e){}
+    try{
+      const j=await call('GET','/models?pageSize=1000');
+      const ver=n=>{const m=n.match(/gemini-(\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):0};
+      const m=(j.models||[]).filter(x=>(x.supportedGenerationMethods||[]).includes('generateContent'))
+        .map(x=>x.name.replace(/^models\//,''))
+        .filter(n=>/^gemini-[\d.]+-flash(-lite)?$/.test(n)||n==='gemini-flash-latest')
+        .sort((a,b)=>(a==='gemini-flash-latest'?-1:b==='gemini-flash-latest'?1:0)||ver(b)-ver(a)||(a.includes('lite')-b.includes('lite')));
+      if(m.length){ls.set(K_LIST,JSON.stringify({t:Date.now(),m}));return m}
+    }catch(e){if(e.code==='bad_key')throw e}
+    return [];
+  }
+  async function chain(){
+    const list=[G.model(),...(await discover()).slice(0,4),...FALLBACK].filter(Boolean);
+    return [...new Set(list)];
+  }
+  const blobB64=b=>new Promise((ok,no)=>{const f=new FileReader();f.onload=()=>ok(String(f.result).split(',')[1]);f.onerror=()=>no(err('image','อ่านไฟล์ภาพไม่ได้'));f.readAsDataURL(b)});
+  function parseJson(t){
+    t=String(t||'').replace(/^\uFEFF/,'').trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');
+    try{return JSON.parse(t)}catch(e){}
+    const a=t.search(/[\[{]/),z=Math.max(t.lastIndexOf('}'),t.lastIndexOf(']'));
+    if(a>=0&&z>a){try{return JSON.parse(t.slice(a,z+1))}catch(e){}}
+    throw err('bad_json','AI ตอบรูปแบบที่อ่านไม่ได้');
+  }
+  // อินเทอร์เฟซเดียวกับของเดิม: json(prompt,{images,onStatus}) -> object
+  G.json=async function(prompt,opt={}){
+    const say=opt.onStatus||(()=>{});
+    const parts=[];
+    for(const im of (opt.images||[]).slice(0,MAX_IMAGES)){
+      const small=im.type==='image/jpeg'&&im.size<3e6?im:await aiImg(im); // ย่อภาพก่อนส่งเพื่อลดขนาด/ความผิดพลาด
+      parts.push({inline_data:{mime_type:'image/jpeg',data:await blobB64(small)}});
+    }
+    parts.push({text:prompt});
+    const body={contents:[{role:'user',parts}],generationConfig:{responseMimeType:'application/json',maxOutputTokens:32768}};
+    const models=await chain();let last=null;
+    for(const model of models){
+      for(let i=0;i<3;i++){
+        try{
+          if(i>0||model!==models[0])say(`🔁 ลองใหม่ (โมเดล ${model}${i?` · ครั้งที่ ${i+1}`:''})...`);
+          const j=await call('POST',`/models/${encodeURIComponent(model)}:generateContent`,body);
+          const c=j.candidates&&j.candidates[0];
+          if(!c){const br=j.promptFeedback&&j.promptFeedback.blockReason;throw err('blocked','Google ไม่ตอบ'+(br?' (ถูกกรอง: '+br+')':''))}
+          const txt=(c.content&&c.content.parts||[]).map(p=>p.text||'').join('');
+          if(!txt.trim())throw err('empty','AI ไม่ส่งข้อมูลกลับมา'+(c.finishReason?' ('+c.finishReason+')':''));
+          const out=parseJson(txt);G.lastModel=model;return out;
+        }catch(e){
+          last=e;
+          if(e.code==='bad_key'||e.code==='bad_request'||e.code==='no_key'||e.code==='image')throw e; // ลองซ้ำไม่ช่วย
+          if(e.code==='model_missing')break;                       // ข้ามไปโมเดลถัดไป
+          if(e.code==='rate_limited'&&i>=1)break;                  // โควตาเต็ม: สลับโมเดล
+          if(i<2)await sleep(1200*(i+1)*(1+Math.random()*.5));    // 503/timeout/JSON เสีย: รอแล้วลองใหม่
+        }
+      }
+    }
+    throw last||err('unknown','เรียก Google AI ไม่สำเร็จ');
+  };
+  G.test=async function(){const r=await G.json('ตอบเป็น JSON เท่านั้น: {"ok":true}');if(!r||r.ok!==true)throw err('bad_json','ตอบกลับไม่ตรงรูปแบบ');return G.lastModel};
+  return G;
+})();
+function gemFmtErr(e){return (e&&e.message)||'เกิดข้อผิดพลาด'}
+// หน้าต่างตั้งค่าคีย์ Google AI (สร้างเมื่อเปิดครั้งแรก)
+function openGemSettings(){
+  let m=document.getElementById('gem-modal');
+  if(!m){
+    m=document.createElement('div');m.id='gem-modal';
+    m.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.85);display:flex;align-items:center;justify-content:center;padding:16px;z-index:90';
+    m.innerHTML=`<div style="background:#fff;border-radius:16px;max-width:460px;width:100%;padding:20px;font-size:14px">
+      <div style="font-size:18px;font-weight:700;margin-bottom:6px">⚙️ ตั้งค่า Google AI (Gemini)</div>
+      <div style="font-size:12px;color:#475569;margin-bottom:10px">ใช้อ่านภาพ/PDF/ตารางและแยกรายชื่อ ขอคีย์ฟรีได้ที่ Google AI Studio (aistudio.google.com → Get API key) คีย์เก็บในเบราว์เซอร์ของเครื่องนี้เท่านั้น</div>
+      <label style="font-size:12px;font-weight:600">API Key</label>
+      <input id="gem-key" type="password" autocomplete="off" style="width:100%;border:1px solid #cbd5e1;border-radius:8px;padding:8px;margin:2px 0 8px" placeholder="AIza...">
+      <label style="font-size:12px;font-weight:600">โมเดล (เว้นว่าง = เลือกรุ่น Flash ล่าสุดให้อัตโนมัติและสลับสำรองเมื่อขัดข้อง)</label>
+      <input id="gem-model" type="text" style="width:100%;border:1px solid #cbd5e1;border-radius:8px;padding:8px;margin:2px 0 8px" placeholder="เช่น gemini-3.6-flash">
+      <div id="gem-st" style="font-size:12px;min-height:18px;margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button id="gem-save" style="flex:1;background:#059669;color:#fff;border-radius:8px;padding:8px;font-weight:600">บันทึกและทดสอบ</button>
+        <button id="gem-del" style="border:1px solid #cbd5e1;border-radius:8px;padding:8px">ลบคีย์</button>
+        <button id="gem-close" style="border:1px solid #cbd5e1;border-radius:8px;padding:8px">ปิด</button></div></div>`;
+    document.body.appendChild(m);
+    const st=m.querySelector('#gem-st');
+    m.querySelector('#gem-close').onclick=()=>{m.style.display='none'};
+    m.querySelector('#gem-del').onclick=()=>{GEM.save('','');m.querySelector('#gem-key').value='';m.querySelector('#gem-model').value='';st.style.color='#475569';st.textContent='ลบคีย์แล้ว';refreshGemUI()};
+    m.querySelector('#gem-save').onclick=async()=>{
+      const k=m.querySelector('#gem-key').value.trim();if(!k){st.style.color='#be123c';st.textContent='กรุณากรอก API Key';return}
+      GEM.save(k,m.querySelector('#gem-model').value);st.style.color='#475569';st.textContent='⏳ กำลังทดสอบการเชื่อมต่อกับ Google...';
+      try{const md=await GEM.test();st.style.color='#047857';st.textContent='✅ เชื่อมต่อสำเร็จ · ใช้โมเดล '+md;refreshGemUI()}
+      catch(e){st.style.color='#be123c';st.textContent='❌ '+gemFmtErr(e);refreshGemUI()}
+    };
+  }
+  m.querySelector('#gem-key').value=GEM.key();m.querySelector('#gem-model').value=GEM.model();
+  m.querySelector('#gem-st').textContent='';m.style.display='flex';
+}
+function refreshGemUI(){
+  const ok=!!GEM.key();
+  const n=document.getElementById('q-note');
+  if(n)n.textContent=ok?'การอ่านภาพใช้ Google Gemini — ตรวจรายชื่อที่ติ๊กให้ถูกต้องก่อนบันทึก':'ยังไม่ได้ตั้งค่าคีย์ Google AI — กดปุ่ม "⚙️ ตั้งค่า Google AI" ก่อนใช้การอ่านภาพ (ไฟล์ xlsx / csv / txt ใช้ได้โดยไม่ต้องมีคีย์)';
+  document.querySelectorAll('.gem-btn').forEach(b=>b.textContent=ok?'⚙️ Google AI: ตั้งค่าแล้ว':'⚙️ ตั้งค่า Google AI');
+}
+
 /* ---------- AI import from photo / document ---------- */
 document.querySelectorAll('label>input[type=file]').forEach(i=>i.parentElement.classList.add('filelbl'));
 const AI={cat:CATS[0],files:[],rows:[],prev:[]};
@@ -2051,17 +2181,17 @@ const AI_PROMPT=`คุณคือเจ้าหน้าที่ธุรก
 $('ai-run').onclick=async()=>{
   const st=$('ai-st');$('ai-run').disabled=true;$('ai-res').classList.add('hidden');
   try{
-    const sm=await window.claude?.use?.('sample');if(!sm)throw new Error('ฟังก์ชัน AI ใช้ไม่ได้ในมุมมองนี้ (เปิดผ่านลิงก์ที่เผยแพร่ในแอป Claude)');
+    const sm=GEM;if(!GEM.key()){openGemSettings();throw new Error('ยังไม่ได้ตั้งค่าคีย์ Google AI — ตั้งค่าแล้วกดอ่านอีกครั้ง')}
     st.textContent='⏳ กำลังเตรียมไฟล์...';const {imgs,text}=await aiCollect();
     if(!imgs.length&&!text.trim())throw new Error('ไม่พบเนื้อหาที่อ่านได้');
-    if(imgs.length){const l=await sm.limits();if(!l.images)throw new Error('ระบบนี้ยังไม่รองรับการอ่านรูปภาพ');if(imgs.length>l.images.maxCount)imgs.length=l.images.maxCount}
-    st.textContent='🤖 AI กำลังอ่านและแยกข้อมูล (อาจใช้เวลาครู่หนึ่ง)...';
-    const r=await sm.json(AI_PROMPT+(text?'\n\nเนื้อหาจากไฟล์ข้อความ/ตาราง:\n'+text:''),{images:imgs.length?imgs:undefined,modelTier:'complex',cache:false});
+    if(imgs.length){const l=await sm.limits();if(imgs.length>l.images.maxCount){toast(`อ่านได้สูงสุด ${l.images.maxCount} ภาพ/หน้าต่อครั้ง`);imgs.length=l.images.maxCount}}
+    st.textContent='🤖 Google Gemini กำลังอ่านและแยกข้อมูล (อาจใช้เวลาครู่หนึ่ง)...';
+    const r=await sm.json(AI_PROMPT+(text?'\n\nเนื้อหาจากไฟล์ข้อความ/ตาราง:\n'+text:''),{images:imgs.length?imgs:undefined,onStatus:t=>{st.textContent=t}});
     AI.prev.forEach(u=>URL.revokeObjectURL(u));AI.prev=imgs.map(b=>URL.createObjectURL(b));
     AI.rows=(r.rows||[]).map(x=>{const o={rank:(x.rank||'').trim(),name:(x.name||'').trim(),surname:(x.surname||'').trim(),unit:(x.unit||'').trim(),mission:(x.mission||'').trim(),start:x.start||'',end:x.end||x.start||'',dates:Array.isArray(x.dates)&&x.dates.length?x.dates:null,unc:!!x.uncertain,on:true};aiSync(o);return o});
     if(!AI.rows.length)throw new Error('ไม่พบรายชื่อในเอกสาร'+((r.notes||[]).length?' — '+r.notes.join(' / '):''));
     $('ai-notes').textContent=(r.notes||[]).length?'📝 หมายเหตุจาก AI: '+r.notes.join(' / '):'';
-    st.textContent=`พบ ${AI.rows.length} รายการ`;aiRender();$('ai-res').classList.remove('hidden');
+    st.textContent=`พบ ${AI.rows.length} รายการ · อ่านด้วย ${GEM.lastModel}`;aiRender();$('ai-res').classList.remove('hidden');
   }catch(e){st.textContent='❌ '+((e&&e.message)||'อ่านข้อมูลไม่สำเร็จ')+(e&&e.code==='rate_limited'?' (ใช้งานถี่เกินไป รอสักครู่)':'')}
   aiEnable();
 };
@@ -2273,12 +2403,9 @@ const nk=p=>pkey(p.name,p.surname);
 let sampleFn=null,imgMax=4,lastAddable=[],perDates=new Map();
 function addRange(k,r){const a=perDates.get(k)||[];if(!a.some(x=>x.start===r.start&&x.end===r.end))a.push(r);perDates.set(k,a)}
 function nd(v){v=String(v||'').trim();const m=v.match(/^(\d{4})-(\d{2})-(\d{2})$/);if(!m)return'';let y=+m[1];if(y>2400)y-=543;const d=new Date(y,+m[2]-1,+m[3]);if(y<2000||y>2100||d.getMonth()!==+m[2]-1)return'';return `${y}-${m[2]}-${m[3]}`}
-(async()=>{
-  let ok=false;
-  try{const c=window.claude?await claude.use('sample'):null;if(c){sampleFn=c;const l=await c.limits().catch(()=>null);if(l&&l.images){ok=true;imgMax=l.images.maxCount||4}}}catch(e){}
-  document.querySelectorAll('.q-img').forEach(el=>el.style.display=ok?'':'none');
-  $('q-note').textContent=ok?'การอ่านภาพใช้ Claude ในบัญชีของผู้ใช้ — ตรวจรายชื่อที่ติ๊กให้ถูกต้องก่อนบันทึก':'เวอร์ชันนี้ยังไม่รองรับการอ่านภาพ ใช้ไฟล์ข้อมูล (xlsx / csv / txt) แทน';
-})();
+sampleFn=GEM;imgMax=16;refreshGemUI();
+document.querySelectorAll('.q-img').forEach(el=>{el.style.display='';el.addEventListener('click',e=>{if(!GEM.key()){e.preventDefault();openGemSettings()}})});
+
 function lev(a,b){const m=a.length,n=b.length;if(Math.abs(m-n)>1)return 2;const d=Array.from({length:m+1},(_,i)=>[i]);for(let j=1;j<=n;j++)d[0][j]=j;for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return d[m][n]}
 function findP(name,surname,map){
   const k=pkey(name,surname);if(map.has(k))return map.get(k);
@@ -2331,11 +2458,11 @@ const IMG_PROMPT=`ภาพที่แนบเป็นเอกสาร บ�
 {"mission":"ชื่อภารกิจหรือเรื่อง ถ้าไม่มีให้เป็น \"\"","start":"YYYY-MM-DD วันเริ่มรวมของเอกสาร หรือ \"\"","end":"YYYY-MM-DD วันสิ้นสุดรวมของเอกสาร หรือ \"\"","people":[{"rank":"ยศหรือคำนำหน้า","name":"ชื่อ","surname":"นามสกุล","start":"YYYY-MM-DD ถ้าระบุวันที่เฉพาะคนนั้น ไม่งั้น \"\"","end":"YYYY-MM-DD ถ้าระบุ ไม่งั้น \"\""}]}
 กติกา: คัดลอกชื่อตามที่เห็น ห้ามเดาหรือแต่งชื่อ ตัวอักษรที่อ่านไม่ออกให้ใส่ ? ในตำแหน่งนั้น; ปีในเอกสารไทยมักเป็น พ.ศ. ให้แปลงเป็น ค.ศ. โดยลบ 543 (เช่น 2569 เป็น 2026) ปีย่อสองหลักเช่น 69 คือ พ.ศ. 2569; วันเดียวให้ start เท่ากับ end; ถ้าไม่มีปีในเอกสารให้ใช้ปีงบประมาณ 2570 คือ เดือน ต.ค.-ธ.ค. เป็น ค.ศ. 2026 และ ม.ค.-ก.ย. เป็น ค.ศ. 2027; ถ้าไม่พบวันที่หรือภารกิจให้ใส่ "" ห้ามเดา; ถ้าไม่มีวันที่รายคน ให้ใส่ start และ end ของคนเป็น ""; ไม่ต้องรวมหัวตาราง เลขลำดับ หรือลายเซ็น`;
 const onImgs=async e=>{
-  const fs=[...e.target.files];e.target.value='';if(!fs.length||!sampleFn)return;
+  const fs=[...e.target.files];e.target.value='';if(!fs.length)return;if(!GEM.key()){openGemSettings();return}
   if(fs.length>imgMax)toast(`อ่านได้สูงสุด ${imgMax} ภาพต่อครั้ง จะใช้ ${imgMax} ภาพแรก`);
-  $('q-status').textContent='⏳ Claude กำลังอ่านรายชื่อและวันที่จากภาพ... (อาจใช้เวลาหลายสิบวินาที)';$('q-miss').classList.add('hidden');
+  $('q-status').textContent='⏳ Google Gemini กำลังอ่านรายชื่อและวันที่จากภาพ... (อาจใช้เวลาหลายสิบวินาที)';$('q-miss').classList.add('hidden');
   try{
-    const data=await sampleFn.json(IMG_PROMPT,{images:fs.slice(0,imgMax),cache:false});
+    const data=await GEM.json(IMG_PROMPT,{images:fs.slice(0,imgMax),onStatus:t=>{$('q-status').textContent=t}});
     const meta=Array.isArray(data)?{}:(data||{}),people=Array.isArray(data)?data:meta.people;
     if(!Array.isArray(people))throw new Error('อ่านผลลัพธ์ไม่ได้');
     const map=new Map(ROSTER.map(p=>[nk(p),p])),found=new Map(),miss=[];
@@ -2362,7 +2489,7 @@ const onImgs=async e=>{
     const extra=(os?` · วันที่ ${thDate(os)}–${thDate(oe)}`:' · ไม่พบวันที่ในภาพ (กรอกเอง)')+(mis?` · ภารกิจ: ${mis}`:' · ไม่พบภารกิจในภาพ')+(per?` · พบ ${rs.length} ช่วงวันที่ต่างกันรายบุคคล`:'')+' — โปรดตรวจความถูกต้องก่อนบันทึก';
     showResult(found,miss,`ภาพ ${Math.min(fs.length,imgMax)} ภาพ`,extra);
   }catch(err){
-    const m={not_granted:'ไม่ได้อนุญาตให้ Claude อ่านภาพ',rate_limited:'ใช้งานถี่เกินไป โปรดรอสักครู่แล้วลองใหม่',image_rejected:'ไฟล์ภาพไม่รองรับหรือใหญ่เกินไป',images_unavailable:'หน้านี้ยังอ่านภาพไม่ได้'};
+    const m={rate_limited:'โควตา/การใช้งานถี่เกินไป โปรดรอสักครู่แล้วลองใหม่'};
     $('q-status').textContent='อ่านภาพไม่สำเร็จ: '+(m[err&&err.code]||(err&&err.message)||'เกิดข้อผิดพลาด');
   }
 };
@@ -2385,5 +2512,7 @@ $('rep-print').onclick=()=>{try{window.print()}catch(e){toast('กด Ctrl+P (Ma
 render();initStore();
 </script>
 
+
+</body></html>
 
 </body></html>
